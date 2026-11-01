@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""IE: offline, read-only topic browser for Lab.md. Never executes commands."""
+import argparse
+import difflib
+import os
+from pathlib import Path
+import re
+import sys
+
+DB = Path(os.environ.get('IE_FILE', str(Path.home() / '.local/share/ie/Lab.md'))).expanduser()
+HEADING = re.compile(r'^\s{0,3}(#{1,6})\s+(.+?)\s*$')
+OLD_BOLD = re.compile(r'^\s*\*\*(.+?)\*\*\s*$')
+
+def normalize(s):
+    return re.sub(r'[^a-z0-9]', '', s.casefold())
+
+def read_sections(path):
+    content = path.read_text(encoding='utf-8-sig')
+    sections = []
+    for line in content.splitlines(keepends=True):
+        m = HEADING.match(line)
+        b = OLD_BOLD.match(line)
+        if m or b:
+            name = (m.group(2) if m else b.group(1)).strip()
+            level = len(m.group(1)) if m else 1
+            if name:
+                sections.append({'name': name, 'level': level, 'body': []})
+                continue
+        if sections:
+            sections[-1]['body'].append(line)
+    return sections
+
+def list_topics(sections):
+    print('Topics in Lab.md:\n')
+    for i, s in enumerate(sections, 1):
+        print(f" {i:>2}. {'  ' * (s['level'] - 1)}{s['name']}")
+    print('\nTry: ie bettercap | ie 12 | ie -s snort | ie -i')
+
+def render(sections, indexes):
+    for num, i in enumerate(indexes):
+        s = sections[i]
+        if num:
+            print('\n' + '─' * 48 + '\n')
+        print(f"[{i + 1}] {s['name']}\n")
+        output = list(s['body'])
+        # Parent headings include their direct and nested children.
+        for j in range(i + 1, len(sections)):
+            child = sections[j]
+            if child['level'] <= s['level']:
+                break
+            output.extend(['\n', f"[{child['name']}]\n", '\n'])
+            output.extend(child['body'])
+        # Write exact source content: do not unescape or normalize command lines.
+        print(''.join(output).strip('\n') or '(No content in this section)')
+
+def find(sections, query):
+    q = normalize(query)
+    if query.strip().isdigit():
+        n = int(query.strip())
+        return [n - 1] if 1 <= n <= len(sections) else []
+    exact = [i for i, s in enumerate(sections) if normalize(s['name']) == q]
+    if exact:
+        return exact
+    return [i for i, s in enumerate(sections) if q and q in normalize(s['name'])]
+
+def interactive(sections):
+    if not sys.stdin.isatty():
+        print('Interactive mode requires a terminal.', file=sys.stderr)
+        return 2
+    while True:
+        try:
+            query = input('\nie (topic / number / /search / ? / q): ').strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if query.casefold() in ('q', 'quit', 'exit'):
+            return 0
+        if query == '?' or not query:
+            list_topics(sections)
+            continue
+        if query.startswith('/'):
+            search(sections, query[1:])
+            continue
+        result = find(sections, query)
+        if result:
+            render(sections, result)
+        else:
+            suggest(sections, query)
+
+def search(sections, term):
+    matches = [(i, s) for i, s in enumerate(sections) if term.casefold() in (s['name'] + ''.join(s['body'])).casefold()]
+    if not matches:
+        print(f'No results for {term!r}.')
+        return
+    print(f'{len(matches)} matching sections:\n')
+    for i, s in matches:
+        print(f' {i+1:>2}. {s["name"]}')
+    print('\nUse: ie <number> to open a result.')
+
+def suggest(sections, query):
+    candidates = [s['name'] for s in sections]
+    suggestions = difflib.get_close_matches(query.casefold(), [n.casefold() for n in candidates], n=5, cutoff=.35)
+    print(f'No topic found for {query!r}.', file=sys.stderr)
+    if suggestions:
+        print('Did you mean: ' + ', '.join(candidates[[n.casefold() for n in candidates].index(x)] for x in suggestions), file=sys.stderr)
+    print('Run ie -h for all headings.', file=sys.stderr)
+
+def main():
+    parser = argparse.ArgumentParser(prog='ie', add_help=False, description='Offline read-only lab notebook')
+    parser.add_argument('topic', nargs='*')
+    parser.add_argument('-h', '-l', '--list', action='store_true', help='List all topics')
+    parser.add_argument('--help', action='store_true', help='Show usage')
+    parser.add_argument('-s', '--search', metavar='TEXT', help='Search headings and section content')
+    parser.add_argument('-i', '--interactive', action='store_true', help='Interactive selection')
+    parser.add_argument('-f', '--file', type=Path, default=DB, help='Use another Lab.md file')
+    args = parser.parse_args()
+    if args.help:
+        parser.print_help()
+        print('\nExamples: ie -h | ie bettercap | ie 12 | ie -s nmap | ie -i')
+        return 0
+    try:
+        sections = read_sections(args.file.expanduser())
+    except (OSError, UnicodeError) as exc:
+        print(f'Unable to read {args.file}: {exc}', file=sys.stderr)
+        return 1
+    if not sections:
+        print('No Markdown headings found.', file=sys.stderr)
+        return 1
+    if args.search is not None:
+        search(sections, args.search)
+    elif args.interactive:
+        return interactive(sections)
+    elif args.list or not args.topic:
+        list_topics(sections)
+    else:
+        query = ' '.join(args.topic)
+        indexes = find(sections, query)
+        if not indexes:
+            suggest(sections, query)
+            return 2
+        render(sections, indexes)
+    return 0
+
+if __name__ == '__main__':
+    raise SystemExit(main())
