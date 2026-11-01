@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """IE: offline, read-only topic browser for Lab.md. Never executes commands."""
 import argparse
+import string
 import difflib
+import html
 import os
 from pathlib import Path
 import re
@@ -10,6 +12,17 @@ import sys
 DB = Path(os.environ.get('IE_FILE', str(Path.home() / '.local/share/ie/Lab.md'))).expanduser()
 HEADING = re.compile(r'^\s{0,3}(#{1,6})\s+(.+?)\s*$')
 OLD_BOLD = re.compile(r'^\s*\*\*(.+?)\*\*\s*$')
+# Only unescape Markdown backslash escapes of ASCII punctuation. Do not
+# touch shell escapes such as \n, Windows paths, or ordinary text.
+MD_ESCAPE = re.compile(r'\\([' + re.escape(string.punctuation) + r'])')
+
+def markdown_unescape(text):
+    # Decode Markdown backslash escapes and HTML character references from
+    # exported notes (for example &#x20; means a literal space).
+    decoded = html.unescape(MD_ESCAPE.sub(lambda match: match.group(1), text))
+    # A Markdown export may insert empty paragraphs between shell continuation
+    # lines. Collapse only those separators in the terminal display.
+    return re.sub(r'(\\)\n(?:[ \t]*\n)+', r'\1\n', decoded)
 
 def normalize(s):
     return re.sub(r'[^a-z0-9]', '', s.casefold())
@@ -36,7 +49,7 @@ def list_topics(sections):
         print(f" {i:>2}. {'  ' * (s['level'] - 1)}{s['name']}")
     print('\nTry: ie bettercap | ie 12 | ie -s snort | ie -i')
 
-def render(sections, indexes):
+def render(sections, indexes, raw=False):
     for num, i in enumerate(indexes):
         s = sections[i]
         if num:
@@ -50,8 +63,8 @@ def render(sections, indexes):
                 break
             output.extend(['\n', f"[{child['name']}]\n", '\n'])
             output.extend(child['body'])
-        # Write exact source content: do not unescape or normalize command lines.
-        print(''.join(output).strip('\n') or '(No content in this section)')
+        display = ''.join(output).strip('\n')
+        print((display if raw else markdown_unescape(display)) or '(No content in this section)')
 
 def find(sections, query):
     q = normalize(query)
@@ -113,6 +126,7 @@ def main():
     parser.add_argument('-s', '--search', metavar='TEXT', help='Search headings and section content')
     parser.add_argument('-i', '--interactive', action='store_true', help='Interactive selection')
     parser.add_argument('-f', '--file', type=Path, default=DB, help='Use another Lab.md file')
+    parser.add_argument('--raw', action='store_true', help='Display original Markdown escapes verbatim')
     args = parser.parse_args()
     if args.help:
         parser.print_help()
@@ -138,7 +152,7 @@ def main():
         if not indexes:
             suggest(sections, query)
             return 2
-        render(sections, indexes)
+        render(sections, indexes, raw=args.raw)
     return 0
 
 if __name__ == '__main__':
